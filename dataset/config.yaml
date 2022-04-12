@@ -1,0 +1,8 @@
+equalweights_sequence:
+  COMMON_RATIO: 0.2
+  M: 25
+  RARE_RATIO: 0.8
+  n: 100
+  p: 0.8
+  q: 0.2
+kservers: 10
