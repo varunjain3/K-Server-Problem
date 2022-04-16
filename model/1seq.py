@@ -8,10 +8,7 @@ from torchvision.datasets import MNIST
 from torchvision import transforms
 from torch.utils.data import DataLoader, random_split
 
-# pl set seed
-pl.seed_everything(42)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-MAX_PAGES = 10000
+
 
 
 class Dataset(torch.utils.data.Dataset):
@@ -37,8 +34,10 @@ class Dataset(torch.utils.data.Dataset):
 
 
 class Train_Memory_Model(pl.LightningModule):
-    def __init__(self, max_pages=100, embedding_size=32, hidden_dim=64, n_layers=1, p=0.4):
+    def __init__(self, max_pages=100, embedding_size=128, hidden_dim=128, n_layers=1, p=0.4):
         super().__init__()
+
+        intermediate_layer = int(max_pages//2)
 
         # Memory Model
         self.max_pages = max_pages
@@ -46,7 +45,9 @@ class Train_Memory_Model(pl.LightningModule):
             max_pages, embedding_size, hidden_dim, n_layers, p)
         # Freeze the weights of the embedding layer
         self.memory_model.input_embedding.weight.requires_grad = False
-        self.fc = nn.Linear(hidden_dim, max_pages)
+        self.fc1 = nn.Linear(hidden_dim, intermediate_layer)
+        self.bn = nn.BatchNorm1d(intermediate_layer)
+        self.fc2 = nn.Linear(intermediate_layer, max_pages)
 
     def forward(self, x):
         batch_size = x.size()[0]
@@ -54,7 +55,9 @@ class Train_Memory_Model(pl.LightningModule):
         hidden_dim = self.memory_model.hidden_dim
         out_score, hidden = self.memory_model(x)
 
-        out_space = self.fc(hidden.view(batch_size, hidden_dim))
+        out_space = self.fc1(hidden.view(batch_size, hidden_dim))
+        out_space = self.bn(out_space)
+        out_space = self.fc2(out_space)
         out_score = F.log_softmax(out_space, dim=-1)
         return out_score, hidden
 
@@ -64,6 +67,14 @@ class Train_Memory_Model(pl.LightningModule):
         x_hat, hidden = self.forward(x)
         loss = F.cross_entropy(x_hat, y)
         self.log("train_loss", loss)
+        return loss
+    
+    def validation_step(self, batch,batch_idx):
+        # validation_step defines the validation loop. It is independent of forward
+        x, y = batch
+        x_hat, hidden = self.forward(x)
+        loss = F.cross_entropy(x_hat, y)
+        self.log("val_loss", loss)
         return loss
 
     def configure_optimizers(self):
@@ -90,10 +101,25 @@ net.fc2.bias.requires_grad = True
 optimizer.add_param_group({'params': net.fc2.parameters()})
 '''
 
-dataset = Dataset(range(MAX_PAGES))
-train, val = random_split(dataset, [9000, 1000])
+if __name__ == '__main__':
+    # pl set seed
+    pl.seed_everything(42)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    MAX_PAGES = 10000
 
-autoencoder = Train_Memory_Model(max_pages=MAX_PAGES)
-trainer = pl.Trainer()
-trainer.fit(autoencoder, DataLoader(train, batch_size=16,),
-            DataLoader(val, batch_size=16,))
+    temp = list(range(MAX_PAGES))
+
+    dataset = Dataset(temp)
+    train, val = random_split(dataset, [int(MAX_PAGES*0.9), int(MAX_PAGES*0.1)])
+
+    batch_size = 512
+    shuffle = True
+    pin_memory = True
+    num_workers = 4
+    train = DataLoader(train, batch_size=batch_size, shuffle=shuffle,num_workers=num_workers, persistent_workers=True)
+    val = DataLoader(val, batch_size=batch_size, shuffle=False,num_workers=num_workers, persistent_workers=True)
+
+
+    autoencoder = Train_Memory_Model(max_pages=MAX_PAGES)
+    trainer = pl.Trainer(accelerator="gpu",devices=2, max_epochs=100,accumulate_grad_batches={5: 3, 10: 20},log_every_n_steps=5)
+    trainer.fit(autoencoder, train,val)
